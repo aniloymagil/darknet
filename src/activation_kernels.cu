@@ -199,6 +199,17 @@ __global__ void activate_array_swish_kernel(float *x, int n, float *output_sigmo
     }
 }
 
+// https://github.com/digantamisra98/Mish
+__global__ void activate_array_mish_kernel(float *x, int n, float *activation_input, float *output_gpu)
+{
+    int i = (blockIdx.x + blockIdx.y*gridDim.x) * blockDim.x + threadIdx.x;
+    if (i < n) {
+        float x_val = x[i];
+        activation_input[i] = x_val;    // store value before activation
+        output_gpu[i] = x_val * tanh_activate_kernel(log(1 + expf(x_val)));
+    }
+}
+
 __global__ void activate_array_leaky_kernel(float *x, int n)
 {
     int index = blockIdx.x*blockDim.x + threadIdx.x;
@@ -260,6 +271,31 @@ __global__ void gradient_array_swish_kernel(float *x, int n, float *sigmoid_gpu,
     if (i < n) {
         float swish = x[i];
         delta[i] *= swish + sigmoid_gpu[i] * (1 - swish); // gradient_kernel(x[i], a);
+    }
+}
+
+// https://github.com/digantamisra98/Mish
+__global__ void gradient_array_mish_kernel(int n, float *activation_input_gpu, float *delta)
+{
+    int i = (blockIdx.x + blockIdx.y*gridDim.x) * blockDim.x + threadIdx.x;
+    if (i < n) {
+        const float THRESHOLD = 20.0f;
+
+        // implementation from TensorFlow: https://github.com/tensorflow/addons/commit/093cdfa85d334cbe19a37624c33198f3140109ed
+        // implementation from Pytorch: https://github.com/thomasbrandon/mish-cuda/blob/master/csrc/mish.h#L26-L31
+        float inp = activation_input_gpu[i];
+        const float sp = (inp < THRESHOLD) ? log1p(exp(inp)) : inp;
+        const float grad_sp = 1 - exp(-sp);
+        const float tsp = tanh(sp);
+        const float grad_tsp = (1 - tsp*tsp) * grad_sp;
+        const float grad = inp * grad_tsp + tsp;
+        delta[i] *= grad;
+
+        //float x = activation_input[i];
+        //float d = 2 * expf(x) + expf(2 * x) + 2;
+        //float w = 4 * (x + 1) + 4 * expf(2 * x) + expf(3 * x) + expf(x)*(4 * x + 6);
+        //float derivative = expf(x) * w / (d * d);
+        //delta[i] *= derivative;
     }
 }
 
@@ -333,6 +369,13 @@ extern "C" void activate_array_swish_ongpu(float *x, int n, float *output_sigmoi
     CHECK_CUDA(cudaPeekAtLastError());
 }
 
+extern "C" void activate_array_mish_ongpu(float *x, int n, float *activation_input_gpu, float *output_gpu)
+{
+    const int num_blocks = get_number_of_blocks(n, BLOCK);
+    activate_array_mish_kernel << <cuda_gridsize(n), BLOCK, 0, get_cuda_stream() >> >(x, n, activation_input_gpu, output_gpu);
+    CHECK_CUDA(cudaPeekAtLastError());
+}
+
 extern "C" void gradient_array_ongpu(float *x, int n, ACTIVATION a, float *delta)
 {
     const int num_blocks = get_number_of_blocks(n, BLOCK);
@@ -353,5 +396,12 @@ extern "C" void gradient_array_swish_ongpu(float *x, int n, float *sigmoid_gpu, 
 {
     const int num_blocks = get_number_of_blocks(n, BLOCK);
     gradient_array_swish_kernel << <cuda_gridsize(n), BLOCK, 0, get_cuda_stream() >> > (x, n, sigmoid_gpu, delta);
+    CHECK_CUDA(cudaPeekAtLastError());
+}
+
+extern "C" void gradient_array_mish_ongpu(int n, float *activation_input_gpu, float *delta)
+{
+    const int num_blocks = get_number_of_blocks(n, BLOCK);
+    gradient_array_mish_kernel << <cuda_gridsize(n), BLOCK, 0, get_cuda_stream() >> > (n, activation_input_gpu, delta);
     CHECK_CUDA(cudaPeekAtLastError());
 }
